@@ -1,2 +1,2 @@
 # Flex-2.0
-This repository contains the required files for "Flex 2.0", the combined semester project for course Database Systems and Software Design and Analysis. It contains all the UML diagrams required for Software Design and Analysis course, as well as the implementation required for Database Systems course
+As we all know, Flex is the worst software of the best CS university of Pakistan. So in this project of ours, we have decided to re-model Flex, giving it some new and useful features, and refining the already made ones.
