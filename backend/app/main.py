@@ -143,3 +143,136 @@ def update_user(user_id: int, payload: UserUpdate, admin: User = Depends(require
     db.refresh(user)
     return user
 
+@app.put("/students/{student_id}/profile")
+def upsert_student_profile(
+    student_id: int,
+    payload: StudentProfileUpsert,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> dict[str, str]:
+    student = db.get(User, student_id)
+    if not student or student.role != Role.student:
+        raise HTTPException(status_code=404, detail="Student not found")
+    if student.campus_id != admin.campus_id:
+        raise HTTPException(status_code=403, detail="Campus mismatch")
+
+    allowed = db.scalar(
+        select(CampusProgram).where(
+            and_(CampusProgram.campus_id == student.campus_id, CampusProgram.program_id == payload.program_id)
+        )
+    )
+    if not allowed:
+        raise HTTPException(status_code=400, detail="Program not offered in this campus")
+
+    profile = db.scalar(select(StudentProfile).where(StudentProfile.student_id == student_id))
+    if not profile:
+        profile = StudentProfile(student_id=student_id, **payload.model_dump())
+        db.add(profile)
+    else:
+        for key, value in payload.model_dump().items():
+            setattr(profile, key, value)
+    db.commit()
+    return {"status": "updated"}
+
+
+@app.get("/students/{student_id}/eligible-courses", response_model=list[EligibleCourseOut])
+def eligible_courses(student_id: int, term_id: int, db: Session = Depends(get_db), current: User = Depends(get_current_user)):
+    if current.role not in (Role.admin, Role.student):
+        raise HTTPException(status_code=403, detail="Not allowed")
+    if current.role == Role.student and current.id != student_id:
+        raise HTTPException(status_code=403, detail="Not allowed")
+
+    student = db.get(User, student_id)
+    profile = db.scalar(select(StudentProfile).where(StudentProfile.student_id == student_id))
+    if not student or not profile:
+        raise HTTPException(status_code=404, detail="Student profile not found")
+    if current.role == Role.admin and student.campus_id != current.campus_id:
+        raise HTTPException(status_code=403, detail="Campus mismatch")
+
+    passed = set(
+        db.scalars(
+            select(TranscriptEntry.course_id)
+            .join(TranscriptTerm, TranscriptEntry.transcript_term_id == TranscriptTerm.id)
+            .where(and_(TranscriptTerm.student_id == student_id, TranscriptEntry.grade.in_(["A+", "A", "A-", "B+", "B", "B-", "C+", "C"])))
+        ).all()
+    )
+
+    enrolled = set(
+        db.scalars(select(Enrollment.course_id).where(and_(Enrollment.term_id == term_id, Enrollment.student_id == student_id))).all()
+    )
+
+    campus_program = db.scalar(
+        select(CampusProgram).where(
+            and_(CampusProgram.campus_id == student.campus_id, CampusProgram.program_id == profile.program_id)
+        )
+    )
+    if not campus_program:
+        return []
+
+    courses = db.scalars(
+        select(Course).where(and_(Course.program_id == profile.program_id, Course.semester == profile.current_semester))
+    ).all()
+
+    results = []
+    for course in courses:
+        if course.id in enrolled:
+            continue
+        prereqs = db.scalars(select(CoursePrerequisite.prerequisite_course_id).where(CoursePrerequisite.course_id == course.id)).all()
+        if any(prereq not in passed for prereq in prereqs):
+            continue
+        results.append(
+            EligibleCourseOut(
+                course_id=course.id,
+                code=course.code,
+                title=course.title,
+                semester=course.semester,
+                credits=course.credits,
+                has_lab=course.has_lab,
+            )
+        )
+    return results
+
+
+@app.post("/enrollments")
+def create_enrollment(payload: EnrollmentCreate, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
+    student = db.get(User, payload.student_id)
+    course = db.get(Course, payload.course_id)
+    if not student or not course:
+        raise HTTPException(status_code=404, detail="Student or course not found")
+    if student.campus_id != admin.campus_id:
+        raise HTTPException(status_code=403, detail="Campus mismatch")
+    if payload.include_lab and not course.has_lab:
+        raise HTTPException(status_code=400, detail="Lab not available for this course")
+
+    profile = db.scalar(select(StudentProfile).where(StudentProfile.student_id == student.id))
+    if not profile or profile.program_id != course.program_id or profile.current_semester != course.semester:
+        raise HTTPException(status_code=400, detail="Course not valid for student's current semester/program")
+
+    passed = set(
+        db.scalars(
+            select(TranscriptEntry.course_id)
+            .join(TranscriptTerm, TranscriptEntry.transcript_term_id == TranscriptTerm.id)
+            .where(
+                and_(
+                    TranscriptTerm.student_id == payload.student_id,
+                    TranscriptEntry.grade.in_(["A+", "A", "A-", "B+", "B", "B-", "C+", "C"]),
+                )
+            )
+        ).all()
+    )
+    prereqs = db.scalars(select(CoursePrerequisite.prerequisite_course_id).where(CoursePrerequisite.course_id == course.id)).all()
+    if any(prereq not in passed for prereq in prereqs):
+        raise HTTPException(status_code=400, detail="Prerequisites not satisfied")
+
+    exists = db.scalar(
+        select(Enrollment).where(
+            and_(Enrollment.term_id == payload.term_id, Enrollment.student_id == payload.student_id, Enrollment.course_id == payload.course_id)
+        )
+    )
+    if exists:
+        raise HTTPException(status_code=400, detail="Already enrolled")
+
+    enrollment = Enrollment(**payload.model_dump())
+    db.add(enrollment)
+    db.commit()
+    return {"status": "enrolled"}
