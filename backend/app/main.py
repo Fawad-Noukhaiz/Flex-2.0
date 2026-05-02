@@ -276,3 +276,417 @@ def create_enrollment(payload: EnrollmentCreate, admin: User = Depends(require_a
     db.add(enrollment)
     db.commit()
     return {"status": "enrolled"}
+
+@app.post("/assessments")
+def create_assessment(payload: AssessmentTemplateCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if user.role != Role.teacher:
+        raise HTTPException(status_code=403, detail="Teacher only")
+    offering = db.get(CourseOffering, payload.offering_id)
+    if not offering or offering.teacher_id != user.id:
+        raise HTTPException(status_code=403, detail="Offering not assigned to teacher")
+
+    current_weight = db.scalar(
+        select(func.coalesce(func.sum(AssessmentTemplate.weightage), 0.0)).where(AssessmentTemplate.offering_id == payload.offering_id)
+    )
+    if float(current_weight) + payload.weightage > 100.0:
+        raise HTTPException(status_code=400, detail="Total weightage cannot exceed 100")
+
+    try:
+        category = AssessmentCategory(payload.category)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid assessment category") from exc
+
+    template = AssessmentTemplate(
+        offering_id=payload.offering_id,
+        category=category,
+        title=payload.title,
+        weightage=payload.weightage,
+        total_marks=payload.total_marks,
+    )
+    db.add(template)
+    db.commit()
+    return {"status": "created", "assessment_id": template.id}
+
+
+@app.post("/assessment-scores")
+def upsert_assessment_score(payload: AssessmentScoreUpsert, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if user.role != Role.teacher:
+        raise HTTPException(status_code=403, detail="Teacher only")
+    assessment = db.get(AssessmentTemplate, payload.assessment_id)
+    if not assessment:
+        raise HTTPException(status_code=404, detail="Assessment not found")
+    offering = db.get(CourseOffering, assessment.offering_id)
+    if not offering or offering.teacher_id != user.id:
+        raise HTTPException(status_code=403, detail="Offering not assigned to teacher")
+    enrollment = db.scalar(
+        select(Enrollment).where(
+            and_(
+                Enrollment.term_id == offering.term_id,
+                Enrollment.student_id == payload.student_id,
+                Enrollment.course_id == offering.course_id,
+                Enrollment.section == offering.section,
+            )
+        )
+    )
+    if not enrollment:
+        raise HTTPException(status_code=400, detail="Student not enrolled in this offering")
+    if offering.part.value == "lab" and not enrollment.include_lab:
+        raise HTTPException(status_code=400, detail="Student is not enrolled in lab component")
+    if payload.obtained_marks > assessment.total_marks:
+        raise HTTPException(status_code=400, detail="Obtained marks cannot exceed total marks")
+
+    record = db.scalar(
+        select(AssessmentScore).where(
+            and_(AssessmentScore.assessment_id == payload.assessment_id, AssessmentScore.student_id == payload.student_id)
+        )
+    )
+    if not record:
+        db.add(AssessmentScore(**payload.model_dump()))
+    else:
+        record.obtained_marks = payload.obtained_marks
+    db.commit()
+    return {"status": "saved"}
+
+
+@app.post("/attendance-sessions")
+def create_attendance_session(payload: AttendanceSessionCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if user.role != Role.teacher:
+        raise HTTPException(status_code=403, detail="Teacher only")
+    offering = db.get(CourseOffering, payload.offering_id)
+    if not offering or offering.teacher_id != user.id:
+        raise HTTPException(status_code=403, detail="Offering not assigned to teacher")
+    exists = db.scalar(
+        select(AttendanceSession).where(
+            and_(AttendanceSession.offering_id == payload.offering_id, AttendanceSession.class_date == payload.class_date)
+        )
+    )
+    if exists:
+        raise HTTPException(status_code=400, detail="Session already exists for this date")
+    session = AttendanceSession(**payload.model_dump())
+    db.add(session)
+    db.commit()
+    return {"status": "created", "session_id": session.id}
+
+
+@app.post("/attendance-records")
+def upsert_attendance(payload: AttendanceRecordUpsert, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if user.role != Role.teacher:
+        raise HTTPException(status_code=403, detail="Teacher only")
+    session = db.get(AttendanceSession, payload.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    offering = db.get(CourseOffering, session.offering_id)
+    if not offering or offering.teacher_id != user.id:
+        raise HTTPException(status_code=403, detail="Not allowed")
+    enrollment = db.scalar(
+        select(Enrollment).where(
+            and_(
+                Enrollment.term_id == offering.term_id,
+                Enrollment.student_id == payload.student_id,
+                Enrollment.course_id == offering.course_id,
+                Enrollment.section == offering.section,
+            )
+        )
+    )
+    if not enrollment:
+        raise HTTPException(status_code=400, detail="Student not enrolled in this offering")
+    if offering.part.value == "lab" and not enrollment.include_lab:
+        raise HTTPException(status_code=400, detail="Student is not enrolled in lab component")
+    row = db.scalar(
+        select(AttendanceRecord).where(
+            and_(AttendanceRecord.session_id == payload.session_id, AttendanceRecord.student_id == payload.student_id)
+        )
+    )
+    if not row:
+        db.add(AttendanceRecord(**payload.model_dump()))
+    else:
+        row.present = payload.present
+    db.commit()
+    return {"status": "saved"}
+
+
+@app.post("/teacher/maintenance-requests")
+def create_maintenance_request(
+    payload: MaintenanceRequestCreate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if user.role != Role.teacher:
+        raise HTTPException(status_code=403, detail="Teacher only")
+    row = MaintenanceRequest(
+        campus_id=user.campus_id,
+        teacher_id=user.id,
+        classroom=payload.classroom,
+        problem=payload.problem,
+        status=WorkflowStatus.pending,
+    )
+    db.add(row)
+    db.commit()
+    return {"status": "created", "request_id": row.id}
+
+
+@app.get("/maintenance/requests")
+def list_maintenance_requests(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if user.role != Role.maintenance:
+        raise HTTPException(status_code=403, detail="Maintenance role required")
+    rows = db.scalars(
+        select(MaintenanceRequest).where(MaintenanceRequest.campus_id == user.campus_id).order_by(MaintenanceRequest.created_at.desc())
+    ).all()
+    return [
+        {
+            "id": row.id,
+            "campus_id": row.campus_id,
+            "teacher_id": row.teacher_id,
+            "classroom": row.classroom,
+            "problem": row.problem,
+            "status": row.status.value,
+            "created_at": row.created_at,
+            "resolved_by_id": row.resolved_by_id,
+        }
+        for row in rows
+    ]
+
+
+@app.put("/maintenance/requests/{request_id}")
+def update_maintenance_request(
+    request_id: int,
+    payload: MaintenanceRequestUpdate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if user.role != Role.maintenance:
+        raise HTTPException(status_code=403, detail="Maintenance role required")
+    req = db.get(MaintenanceRequest, request_id)
+    if not req or req.campus_id != user.campus_id:
+        raise HTTPException(status_code=404, detail="Request not found")
+    try:
+        req.status = WorkflowStatus(payload.status)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid status") from exc
+    if req.status == WorkflowStatus.fixed:
+        req.resolved_by_id = user.id
+    db.commit()
+    return {"status": "updated"}
+
+
+@app.post("/teacher/extra-class-requests")
+def create_extra_class_request(
+    payload: ExtraClassRequestCreate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if user.role != Role.teacher:
+        raise HTTPException(status_code=403, detail="Teacher only")
+    course = db.get(Course, payload.course_id)
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+    row = ExtraClassRequest(
+        campus_id=user.campus_id,
+        teacher_id=user.id,
+        course_id=payload.course_id,
+        section=payload.section,
+        reason=payload.reason,
+        status=WorkflowStatus.pending,
+    )
+    db.add(row)
+    db.commit()
+    return {"status": "created", "request_id": row.id}
+
+
+@app.get("/secretariat/extra-class-requests")
+def list_extra_class_requests(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if user.role != Role.secretariat:
+        raise HTTPException(status_code=403, detail="Secretariat role required")
+    rows = db.scalars(
+        select(ExtraClassRequest).where(ExtraClassRequest.campus_id == user.campus_id).order_by(ExtraClassRequest.created_at.desc())
+    ).all()
+    return [
+        {
+            "id": row.id,
+            "campus_id": row.campus_id,
+            "teacher_id": row.teacher_id,
+            "course_id": row.course_id,
+            "section": row.section,
+            "reason": row.reason,
+            "status": row.status.value,
+            "schedule_note": row.schedule_note,
+            "created_at": row.created_at,
+            "decided_by_id": row.decided_by_id,
+        }
+        for row in rows
+    ]
+
+
+@app.put("/secretariat/extra-class-requests/{request_id}")
+def update_extra_class_request(
+    request_id: int,
+    payload: ExtraClassRequestUpdate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if user.role != Role.secretariat:
+        raise HTTPException(status_code=403, detail="Secretariat role required")
+    req = db.get(ExtraClassRequest, request_id)
+    if not req or req.campus_id != user.campus_id:
+        raise HTTPException(status_code=404, detail="Request not found")
+    try:
+        req.status = WorkflowStatus(payload.status)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid status") from exc
+    req.schedule_note = payload.schedule_note
+    req.decided_by_id = user.id
+    db.commit()
+    return {"status": "updated"}
+
+
+def _grade_from_percent(percent: float) -> str:
+    if percent >= 86:
+        return "A"
+    if percent >= 82:
+        return "A-"
+    if percent >= 78:
+        return "B+"
+    if percent >= 74:
+        return "B"
+    if percent >= 70:
+        return "B-"
+    if percent >= 66:
+        return "C+"
+    if percent >= 62:
+        return "C"
+    if percent >= 58:
+        return "C-"
+    if percent >= 50:
+        return "D"
+    return "F"
+
+
+@app.post("/automation/finalize")
+def finalize_semester(payload: FinalizeIn, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
+    term = db.get(Term, payload.term_id)
+    if not term:
+        raise HTTPException(status_code=404, detail="Term not found")
+
+    campus_students = db.scalars(
+        select(User).where(and_(User.role == Role.student, User.campus_id == admin.campus_id))
+    ).all()
+
+    grade_points = {"A+": 4, "A": 4, "A-": 3.67, "B+": 3.33, "B": 3, "B-": 2.67, "C+": 2.33, "C": 2, "C-": 1.67, "D": 1, "F": 0}
+
+    finalized = 0
+    for student in campus_students:
+        enrollments = db.scalars(
+            select(Enrollment).where(and_(Enrollment.term_id == term.id, Enrollment.student_id == student.id))
+        ).all()
+        if not enrollments:
+            continue
+
+        course_grade_rows = []
+        can_finalize = True
+        for enrollment in enrollments:
+            offerings = db.scalars(
+                select(CourseOffering).where(
+                    and_(
+                        CourseOffering.term_id == term.id,
+                        CourseOffering.course_id == enrollment.course_id,
+                        CourseOffering.section == enrollment.section,
+                    )
+                )
+            ).all()
+
+            relevant_offering_ids = [
+                o.id
+                for o in offerings
+                if o.part == Part.theory or (enrollment.include_lab and o.part == Part.lab)
+            ]
+            if not relevant_offering_ids:
+                can_finalize = False
+                break
+
+            assessments = db.scalars(
+                select(AssessmentTemplate).where(AssessmentTemplate.offering_id.in_(relevant_offering_ids))
+            ).all()
+            final_assessments = [a for a in assessments if a.category == AssessmentCategory.final]
+            if not final_assessments:
+                can_finalize = False
+                break
+
+            score_map = {
+                score.assessment_id: score.obtained_marks
+                for score in db.scalars(
+                    select(AssessmentScore).where(
+                        and_(
+                            AssessmentScore.student_id == student.id,
+                            AssessmentScore.assessment_id.in_([a.id for a in assessments]),
+                        )
+                    )
+                ).all()
+            }
+
+            if any(final.id not in score_map for final in final_assessments):
+                can_finalize = False
+                break
+
+            total_weight = sum(a.weightage for a in assessments)
+            if total_weight <= 0:
+                can_finalize = False
+                break
+            obtained_weight = 0.0
+            for a in assessments:
+                score = score_map.get(a.id, 0.0)
+                obtained_weight += (score / a.total_marks) * a.weightage if a.total_marks > 0 else 0
+            percent = (obtained_weight / total_weight) * 100
+            course = db.get(Course, enrollment.course_id)
+            course_grade_rows.append((course, _grade_from_percent(percent)))
+
+        if not can_finalize:
+            continue
+
+        existing_tt = db.scalar(
+            select(TranscriptTerm).where(
+                and_(TranscriptTerm.student_id == student.id, TranscriptTerm.term_id == term.id)
+            )
+        )
+        if existing_tt:
+            continue
+
+        tt = TranscriptTerm(student_id=student.id, term_id=term.id, sgpa=0, cgpa=0)
+        db.add(tt)
+        db.flush()
+        total_credits = 0
+        total_points = 0.0
+        for course, grade in course_grade_rows:
+            db.add(TranscriptEntry(transcript_term_id=tt.id, course_id=course.id, grade=grade, credits=course.credits))
+            total_credits += course.credits
+            total_points += grade_points[grade] * course.credits
+
+        sgpa = total_points / total_credits if total_credits else 0.0
+        prior_entries = db.scalars(
+            select(TranscriptEntry)
+            .join(TranscriptTerm, TranscriptEntry.transcript_term_id == TranscriptTerm.id)
+            .where(
+                and_(
+                    TranscriptTerm.student_id == student.id,
+                    TranscriptTerm.id != tt.id,
+                )
+            )
+        ).all()
+        prior_quality_points = 0.0
+        prior_credits = 0
+        for entry in prior_entries:
+            prior_quality_points += grade_points.get(entry.grade, 0) * entry.credits
+            prior_credits += entry.credits
+        cgpa = (prior_quality_points + total_points) / (prior_credits + total_credits) if (prior_credits + total_credits) else 0.0
+        tt.sgpa = round(sgpa, 2)
+        tt.cgpa = round(cgpa, 2)
+
+        profile = db.scalar(select(StudentProfile).where(StudentProfile.student_id == student.id))
+        if profile:
+            profile.current_semester = min(8, profile.current_semester + 1)
+
+        for enrollment in enrollments:
+            db.delete(enrollment)
+        finalized += 1
+
+    db.commit()
+    return {"status": "completed", "finalized_students": finalized}
