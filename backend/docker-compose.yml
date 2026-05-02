@@ -1,0 +1,16 @@
+services:
+  db:
+    image: postgres:16
+    container_name: flex2-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: flex2
+      POSTGRES_USER: flex
+      POSTGRES_PASSWORD: flex
+    ports:
+      - "5432:5432"
+    volumes:
+      - flex2_pgdata:/var/lib/postgresql/data
+
+volumes:
+  flex2_pgdata:
