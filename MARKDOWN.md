@@ -166,3 +166,24 @@ pip install --upgrade pip
 pip install -r requirements.txt
 docker compose up -d
 uvicorn app.main:app --reload --port 8000
+```
+
+### Frontend Setup (Terminal 2)
+
+Open a second terminal and run:
+
+```bash
+cd next-frontend
+npm install
+npm run dev
+```
+
+Once both terminals are running, open [http://localhost:3000](http://localhost:3000) in a browser to access the application. The interactive API documentation is available at [http://localhost:8000/docs](http://localhost:8000/docs).
+
+---
+
+## Conclusion
+
+Flex 2.0 successfully demonstrates the application of database systems concepts in a real-world university management context. The project integrates a normalized relational database schema with a modern REST API, role-based access control, and a responsive frontend interface.
+
+Key database concepts applied include entity-relationship modeling, normalization, foreign key constraints with cascade rules, unique constraints, indexing and complex multi-table queries using SQLAlchemy ORM. The use of Docker ensures the database environment is portable and reproducible across different development machines. The collaborative development approach, with each team member owning a specific architectural layer, ensured clean separation of concerns and allowed for focused development across the database foundation, authentication, API schema and frontend layers. The result is a production-ready university management system that covers the full lifecycle of academic operations.
