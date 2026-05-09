@@ -211,7 +211,7 @@ type ExtraClassRequest = {
   courseId: string;
   section: string;
   reason: string;
-  status: "pending" | "approved" | "scheduled" | "denied";
+  status: "pending" | "approved" | "denied";
   scheduleNote?: string;
 };
 
@@ -248,6 +248,50 @@ type AppState = {
     processedStudentSemesters: string[];
   };
 };
+
+type BackendStateResponse = {
+  current_user_id: string;
+  current_term_id: string | null;
+  campus_ids_by_name: Record<string, number>;
+  program_ids_by_name: Record<string, number>;
+  state: AppState;
+};
+
+type TokenResponse = {
+  access_token: string;
+  token_type: string;
+};
+
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+const TOKEN_STORAGE_KEY = "flex2_access_token";
+
+async function apiRequest<T>(path: string, token: string | null, options: RequestInit = {}): Promise<T> {
+  const headers = new Headers(options.headers);
+  headers.set("Accept", "application/json");
+  if (options.body && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+  if (token) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+
+  const response = await fetch(`${API_BASE_URL}${path}`, { ...options, headers });
+  const text = await response.text();
+  const data = text ? JSON.parse(text) : {};
+  if (!response.ok) {
+    const detail = typeof data.detail === "string" ? data.detail : "Backend request failed.";
+    throw new Error(detail);
+  }
+  return data as T;
+}
+
+function backendId(id: string) {
+  return Number(id);
+}
+
+function compactPayload<T extends Record<string, unknown>>(payload: T): T {
+  return Object.fromEntries(Object.entries(payload).filter(([, value]) => value !== "" && value !== undefined)) as T;
+}
 
 const ratingLabels = ["Extremely Disagree", "Disagree", "Unknown", "Agree", "Extremely Agree"];
 const degreePrograms = [
@@ -943,6 +987,12 @@ function getStdDev(values: number[]) {
 export default function App() {
   const [state, setState] = useState<AppState>(initialState);
   const [activeUserId, setActiveUserId] = useState<string | null>(null);
+  const [authToken, setAuthToken] = useState("");
+  const [currentTermId, setCurrentTermId] = useState<string | null>(null);
+  const [campusIdsByName, setCampusIdsByName] = useState<Record<string, number>>({});
+  const [programIdsByName, setProgramIdsByName] = useState<Record<string, number>>({});
+  const [isBootstrapping, setIsBootstrapping] = useState(false);
+  const [apiMessage, setApiMessage] = useState("");
   const [activeTab, setActiveTab] = useState("profile");
   const [loginInput, setLoginInput] = useState({ rollNumber: "", password: "" });
   const [loginError, setLoginError] = useState("");
@@ -1031,8 +1081,50 @@ export default function App() {
     number: "",
   });
 
+  const refreshBackendState = async (tokenOverride = authToken) => {
+    if (!tokenOverride) return;
+    const payload = await apiRequest<BackendStateResponse>("/frontend/state", tokenOverride);
+    setState(payload.state);
+    setActiveUserId(payload.current_user_id);
+    setCurrentTermId(payload.current_term_id);
+    setCampusIdsByName(payload.campus_ids_by_name);
+    setProgramIdsByName(payload.program_ids_by_name);
+    setApiMessage("");
+    return payload;
+  };
+
+  const runBackendMutation = async (operation: () => Promise<unknown>, successMessage = "Saved to backend.") => {
+    if (!authToken) {
+      setApiMessage("Please sign in again before saving changes.");
+      return false;
+    }
+    try {
+      await operation();
+      await refreshBackendState(authToken);
+      setApiMessage(successMessage);
+      return true;
+    } catch (error) {
+      setApiMessage(error instanceof Error ? error.message : "Backend request failed.");
+      return false;
+    }
+  };
+
   useEffect(() => {
     document.title = "Flex 2.0 | University Management";
+  }, []);
+
+  useEffect(() => {
+    const storedToken = window.localStorage.getItem(TOKEN_STORAGE_KEY);
+    if (!storedToken) return;
+    setIsBootstrapping(true);
+    setAuthToken(storedToken);
+    refreshBackendState(storedToken)
+      .catch(() => {
+        window.localStorage.removeItem(TOKEN_STORAGE_KEY);
+        setAuthToken("");
+        setActiveUserId(null);
+      })
+      .finally(() => setIsBootstrapping(false));
   }, []);
 
   const currentUser = useMemo(() => state.users.find((user) => user.id === activeUserId) ?? null, [state.users, activeUserId]);
@@ -1142,6 +1234,13 @@ export default function App() {
     return state.enrollments.filter((item) => item.studentId === currentUser.id);
   }, [state.enrollments, currentUser]);
 
+  useEffect(() => {
+    if (!currentUser || currentUser.role !== "student" || !studentEnrollments.length) return;
+    if (!studentEnrollments.some((enrollment) => enrollment.courseId === selectedStudentCourse)) {
+      setSelectedStudentCourse(studentEnrollments[0].courseId);
+    }
+  }, [currentUser, studentEnrollments, selectedStudentCourse]);
+
   const isRegistrationOpen =
     state.windows.registration.isOpen && todayIso >= state.windows.registration.start && todayIso <= state.windows.registration.end;
 
@@ -1245,30 +1344,38 @@ export default function App() {
     );
   };
 
-  const login = () => {
-    const user = state.users.find((item) => item.rollNumber === loginInput.rollNumber && item.password === loginInput.password);
-    if (!user) {
-      setLoginError("Invalid credentials. Use demo accounts listed below.");
-      return;
-    }
-    setActiveUserId(user.id);
-    setActiveTab("profile");
+  const login = async () => {
+    setIsBootstrapping(true);
     setLoginError("");
-    setLoginInput({ rollNumber: "", password: "" });
+    try {
+      const token = await apiRequest<TokenResponse>("/auth/login", null, {
+        method: "POST",
+        body: JSON.stringify({ roll_number: loginInput.rollNumber, password: loginInput.password }),
+      });
+      setAuthToken(token.access_token);
+      window.localStorage.setItem(TOKEN_STORAGE_KEY, token.access_token);
+      await refreshBackendState(token.access_token);
+      setActiveTab("profile");
+      setLoginInput({ rollNumber: "", password: "" });
+    } catch (error) {
+      setLoginError(error instanceof Error ? error.message : "Invalid credentials.");
+    } finally {
+      setIsBootstrapping(false);
+    }
   };
 
   const logout = () => {
     setActiveUserId(null);
+    setAuthToken("");
+    setCurrentTermId(null);
+    window.localStorage.removeItem(TOKEN_STORAGE_KEY);
     setActiveTab("profile");
     setPasswordMessage("");
+    setApiMessage("");
   };
 
-  const updatePassword = () => {
+  const updatePassword = async () => {
     if (!currentUser) return;
-    if (passwordForm.currentPassword !== currentUser.password) {
-      setPasswordMessage("Current password is incorrect.");
-      return;
-    }
     if (passwordForm.newPassword.length < 6) {
       setPasswordMessage("New password must be at least 6 characters.");
       return;
@@ -1277,465 +1384,450 @@ export default function App() {
       setPasswordMessage("New password and confirm password do not match.");
       return;
     }
-    setState((prev) => ({
-      ...prev,
-      users: prev.users.map((user) =>
-        user.id === currentUser.id
-          ? {
-              ...user,
-              password: passwordForm.newPassword,
-            }
-          : user,
-      ),
-    }));
-    setPasswordMessage("Password changed successfully.");
-    setPasswordForm({ currentPassword: "", newPassword: "", confirmPassword: "" });
+    const saved = await runBackendMutation(
+      () =>
+        apiRequest("/users/me/password", authToken, {
+          method: "POST",
+          body: JSON.stringify({
+            current_password: passwordForm.currentPassword,
+            new_password: passwordForm.newPassword,
+          }),
+        }),
+      "Password changed successfully.",
+    );
+    if (saved) {
+      setPasswordMessage("Password changed successfully.");
+      setPasswordForm({ currentPassword: "", newPassword: "", confirmPassword: "" });
+    } else {
+      setPasswordMessage(apiMessage || "Password change failed.");
+    }
   };
 
-  const submitMarksRequest = () => {
+  const submitMarksRequest = async () => {
     if (!currentUser || !marksRequestForm.reason.trim() || !selectedStudentCourse) return;
-    setState((prev) => ({
-      ...prev,
-      marksChangeRequests: [
-        {
-          id: `mcr-${Date.now()}`,
-          studentId: currentUser.id,
-          courseId: selectedStudentCourse,
-          part: marksRequestForm.part as "theory" | "lab",
-          component: marksRequestForm.component,
-          reason: marksRequestForm.reason,
-          status: "pending",
-          adminStatus: "none",
-        },
-        ...prev.marksChangeRequests,
-      ],
-    }));
-    setMarksRequestForm((prev) => ({ ...prev, reason: "" }));
+    const saved = await runBackendMutation(
+      () =>
+        apiRequest("/student/marks-change-requests", authToken, {
+          method: "POST",
+          body: JSON.stringify({
+            course_id: backendId(selectedStudentCourse),
+            part: marksRequestForm.part,
+            component: marksRequestForm.component,
+            reason: marksRequestForm.reason,
+          }),
+        }),
+      "Marks change request submitted.",
+    );
+    if (saved) setMarksRequestForm((prev) => ({ ...prev, reason: "" }));
   };
 
-  const submitAttendanceRequest = () => {
+  const submitAttendanceRequest = async () => {
     if (!currentUser || !attendanceRequestForm.reason.trim() || !attendanceRequestForm.date) return;
-    setState((prev) => ({
-      ...prev,
-      attendanceChangeRequests: [
-        {
-          id: `acr-${Date.now()}`,
-          studentId: currentUser.id,
-          courseId: selectedStudentCourse,
-          part: attendanceRequestForm.part as "theory" | "lab",
-          date: attendanceRequestForm.date,
-          reason: attendanceRequestForm.reason,
-          status: "pending",
-          adminStatus: "none",
-        },
-        ...prev.attendanceChangeRequests,
-      ],
-    }));
-    setAttendanceRequestForm((prev) => ({ ...prev, reason: "" }));
+    const saved = await runBackendMutation(
+      () =>
+        apiRequest("/student/attendance-change-requests", authToken, {
+          method: "POST",
+          body: JSON.stringify({
+            course_id: backendId(selectedStudentCourse),
+            part: attendanceRequestForm.part,
+            class_date: attendanceRequestForm.date,
+            reason: attendanceRequestForm.reason,
+          }),
+        }),
+      "Attendance change request submitted.",
+    );
+    if (saved) setAttendanceRequestForm((prev) => ({ ...prev, reason: "" }));
   };
 
-  const registerCourse = (courseId: string, includeLab: boolean) => {
-    if (!currentUser || currentUser.role !== "student" || !isRegistrationOpen) return;
+  const registerCourse = async (courseId: string, includeLab: boolean) => {
+    if (!currentUser || currentUser.role !== "student" || !isRegistrationOpen || !currentTermId) return;
     if (studentEnrollments.length >= 6) return;
     const course = state.courses.find((item) => item.id === courseId);
     if (!course) return;
     if (includeLab && !course.hasLab) return;
-    setState((prev) => ({
-      ...prev,
-      enrollments: [...prev.enrollments, { studentId: currentUser.id, courseId, section: studentInfo?.section ?? "A", includeLab }],
-    }));
+    await runBackendMutation(
+      () =>
+        apiRequest("/enrollments", authToken, {
+          method: "POST",
+          body: JSON.stringify({
+            term_id: backendId(currentTermId),
+            student_id: backendId(currentUser.id),
+            course_id: backendId(courseId),
+            section: studentInfo?.section ?? "A",
+            include_lab: includeLab,
+          }),
+        }),
+      "Course registration saved.",
+    );
   };
 
-  const submitGradeChange = () => {
+  const submitGradeChange = async () => {
     if (!currentUser || !gradeChangeForm.courseId || !gradeChangeForm.reason.trim()) return;
-    setState((prev) => ({
-      ...prev,
-      gradeChangeRequests: [
-        {
-          id: `gcr-${Date.now()}`,
-          studentId: currentUser.id,
-          courseId: gradeChangeForm.courseId,
-          reason: gradeChangeForm.reason,
-          status: "pending",
-        },
-        ...prev.gradeChangeRequests,
-      ],
-    }));
-    setGradeChangeForm({ courseId: "", reason: "" });
+    const saved = await runBackendMutation(
+      () =>
+        apiRequest("/student/grade-change-requests", authToken, {
+          method: "POST",
+          body: JSON.stringify({ course_id: backendId(gradeChangeForm.courseId), reason: gradeChangeForm.reason }),
+        }),
+      "Grade change request submitted.",
+    );
+    if (saved) setGradeChangeForm({ courseId: "", reason: "" });
   };
 
-  const submitWithdrawRequest = () => {
+  const submitWithdrawRequest = async () => {
     if (!currentUser || !withdrawForm.courseId || !withdrawForm.reason.trim()) return;
-    setState((prev) => ({
-      ...prev,
-      withdrawRequests: [
-        { id: `wd-${Date.now()}`, studentId: currentUser.id, courseId: withdrawForm.courseId, reason: withdrawForm.reason, status: "pending" },
-        ...prev.withdrawRequests,
-      ],
-    }));
-    setWithdrawForm({ courseId: "", reason: "" });
+    const saved = await runBackendMutation(
+      () =>
+        apiRequest("/student/withdraw-requests", authToken, {
+          method: "POST",
+          body: JSON.stringify({ course_id: backendId(withdrawForm.courseId), reason: withdrawForm.reason }),
+        }),
+      "Withdrawal request submitted.",
+    );
+    if (saved) setWithdrawForm({ courseId: "", reason: "" });
   };
 
-  const submitRetakeRequest = () => {
+  const submitRetakeRequest = async () => {
     if (!currentUser || !retakeForm.courseId || !retakeForm.reason.trim() || !retakeForm.evidence.trim()) return;
     const personalRequests = state.retakeRequests.filter((item) => item.studentId === currentUser.id);
     if (personalRequests.length >= 2) return;
-    setState((prev) => ({
-      ...prev,
-      retakeRequests: [
-        {
-          id: `rt-${Date.now()}`,
-          studentId: currentUser.id,
-          courseId: retakeForm.courseId,
-          reason: retakeForm.reason,
-          evidence: retakeForm.evidence,
-          status: "pending",
-        },
-        ...prev.retakeRequests,
-      ],
-    }));
-    setRetakeForm({ courseId: "", reason: "", evidence: "" });
+    const saved = await runBackendMutation(
+      () =>
+        apiRequest("/student/retake-requests", authToken, {
+          method: "POST",
+          body: JSON.stringify({
+            course_id: backendId(retakeForm.courseId),
+            reason: retakeForm.reason,
+            evidence: retakeForm.evidence,
+          }),
+        }),
+      "Retake request submitted.",
+    );
+    if (saved) setRetakeForm({ courseId: "", reason: "", evidence: "" });
   };
 
-  const submitFeedback = () => {
+  const submitFeedback = async () => {
     if (!currentUser || !feedbackForm.courseId || !feedbackForm.openText.trim()) return;
     const phase: "Mid" | "End" = state.windows.feedbackMid ? "Mid" : "End";
-    setState((prev) => ({
-      ...prev,
-      feedbackSubmissions: [
-        {
-          id: `fb-${Date.now()}`,
-          studentId: currentUser.id,
-          courseId: feedbackForm.courseId,
-          phase,
-          conceptDelivery: feedbackForm.conceptDelivery,
-          teacherEngagement: feedbackForm.teacherEngagement,
-          openText: feedbackForm.openText,
-        },
-        ...prev.feedbackSubmissions,
-      ],
-    }));
-    setFeedbackForm({ courseId: "", conceptDelivery: 3, teacherEngagement: 3, openText: "" });
+    const saved = await runBackendMutation(
+      () =>
+        apiRequest("/student/feedback-submissions", authToken, {
+          method: "POST",
+          body: JSON.stringify({
+            course_id: backendId(feedbackForm.courseId),
+            phase,
+            concept_delivery: feedbackForm.conceptDelivery,
+            teacher_engagement: feedbackForm.teacherEngagement,
+            open_text: feedbackForm.openText,
+          }),
+        }),
+      "Feedback submitted.",
+    );
+    if (saved) setFeedbackForm({ courseId: "", conceptDelivery: 3, teacherEngagement: 3, openText: "" });
   };
 
-  const createAssessmentTemplate = () => {
+  const createAssessmentTemplate = async () => {
     if (!currentUser || currentUser.role !== "teacher") return;
     if (!assessmentForm.courseId || !assessmentForm.section || !assessmentForm.title.trim()) return;
-    const canManage = teacherManagedSlots.some(
+    const managedSlot = teacherManagedSlots.find(
       (slot) =>
         slot.courseId === assessmentForm.courseId &&
         slot.section === assessmentForm.section &&
         slot.part === assessmentForm.part,
     );
-    if (!canManage) return;
+    if (!managedSlot) return;
 
-    setState((prev) => ({
-      ...prev,
-      assessmentTemplates: [
-        {
-          id: `asmt-${Date.now()}`,
-          courseId: assessmentForm.courseId,
-          section: assessmentForm.section,
-          part: assessmentForm.part,
-          category: assessmentForm.category,
-          title: assessmentForm.title,
-          weightage: Number(assessmentForm.weightage),
-          totalMarks: Number(assessmentForm.totalMarks),
-          createdByTeacherId: currentUser.id,
-        },
-        ...prev.assessmentTemplates,
-      ],
-    }));
-    setAssessmentForm((prev) => ({ ...prev, title: "", weightage: 10, totalMarks: 10 }));
+    const saved = await runBackendMutation(
+      () =>
+        apiRequest("/assessments", authToken, {
+          method: "POST",
+          body: JSON.stringify({
+            offering_id: backendId(managedSlot.id),
+            category: assessmentForm.category,
+            title: assessmentForm.title,
+            weightage: Number(assessmentForm.weightage),
+            total_marks: Number(assessmentForm.totalMarks),
+          }),
+        }),
+      "Assessment template created.",
+    );
+    if (saved) setAssessmentForm((prev) => ({ ...prev, title: "", weightage: 10, totalMarks: 10 }));
   };
 
-  const updateAssessmentScore = (assessmentId: string, studentId: string, obtainedMarks: number) => {
-    setState((prev) => {
-      const existingIndex = prev.assessmentScores.findIndex(
-        (score) => score.assessmentId === assessmentId && score.studentId === studentId,
-      );
-      if (existingIndex === -1) {
-        return {
-          ...prev,
-          assessmentScores: [...prev.assessmentScores, { assessmentId, studentId, obtainedMarks }],
-        };
-      }
-      return {
-        ...prev,
-        assessmentScores: prev.assessmentScores.map((score, index) =>
-          index === existingIndex ? { ...score, obtainedMarks } : score,
-        ),
-      };
-    });
+  const updateAssessmentScore = async (assessmentId: string, studentId: string, obtainedMarks: number) => {
+    await runBackendMutation(
+      () =>
+        apiRequest("/assessment-scores", authToken, {
+          method: "POST",
+          body: JSON.stringify({
+            assessment_id: backendId(assessmentId),
+            student_id: backendId(studentId),
+            obtained_marks: obtainedMarks,
+          }),
+        }),
+      "Assessment score saved.",
+    );
   };
 
-  const createAttendanceSession = () => {
+  const createAttendanceSession = async () => {
     if (!currentUser || currentUser.role !== "teacher") return;
     if (!attendanceSessionForm.courseId || !attendanceSessionForm.section || !attendanceSessionForm.date) return;
-    const canManage = teacherManagedSlots.some(
+    const managedSlot = teacherManagedSlots.find(
       (slot) =>
         slot.courseId === attendanceSessionForm.courseId &&
         slot.section === attendanceSessionForm.section &&
         slot.part === attendanceSessionForm.part,
     );
-    if (!canManage) return;
-    setState((prev) => ({
-      ...prev,
-      attendanceSessions: [
-        {
-          id: `sess-${Date.now()}`,
-          courseId: attendanceSessionForm.courseId,
-          section: attendanceSessionForm.section,
-          part: attendanceSessionForm.part,
-          date: attendanceSessionForm.date,
-          createdByTeacherId: currentUser.id,
-        },
-        ...prev.attendanceSessions,
-      ],
-    }));
+    if (!managedSlot) return;
+    await runBackendMutation(
+      () =>
+        apiRequest("/attendance-sessions", authToken, {
+          method: "POST",
+          body: JSON.stringify({
+            offering_id: backendId(managedSlot.id),
+            class_date: attendanceSessionForm.date,
+          }),
+        }),
+      "Attendance session created.",
+    );
   };
 
-  const markSessionAttendance = (sessionId: string, studentId: string, present: boolean) => {
-    setState((prev) => {
-      const existing = prev.sessionAttendance.find(
-        (entry) => entry.sessionId === sessionId && entry.studentId === studentId,
-      );
-      if (!existing) {
-        return {
-          ...prev,
-          sessionAttendance: [...prev.sessionAttendance, { sessionId, studentId, present }],
-        };
-      }
-      return {
-        ...prev,
-        sessionAttendance: prev.sessionAttendance.map((entry) =>
-          entry.sessionId === sessionId && entry.studentId === studentId ? { ...entry, present } : entry,
-        ),
-      };
-    });
+  const markSessionAttendance = async (sessionId: string, studentId: string, present: boolean) => {
+    await runBackendMutation(
+      () =>
+        apiRequest("/attendance-records", authToken, {
+          method: "POST",
+          body: JSON.stringify({
+            session_id: backendId(sessionId),
+            student_id: backendId(studentId),
+            present,
+          }),
+        }),
+      "Attendance saved.",
+    );
   };
 
-  const updateMarksDecision = (id: string, status: Decision, teacherResponse: string) => {
-    setState((prev) => ({
-      ...prev,
-      marksChangeRequests: prev.marksChangeRequests.map((item) => (item.id === id ? { ...item, status, teacherResponse } : item)),
-    }));
+  const updateMarksDecision = async (id: string, status: Decision, teacherResponse: string) => {
+    await runBackendMutation(
+      () =>
+        apiRequest(`/teacher/marks-change-requests/${id}`, authToken, {
+          method: "PUT",
+          body: JSON.stringify({ status, teacher_response: teacherResponse }),
+        }),
+      "Marks request updated.",
+    );
   };
 
-  const updateAttendanceDecision = (id: string, status: Decision, teacherResponse: string) => {
-    setState((prev) => ({
-      ...prev,
-      attendanceChangeRequests: prev.attendanceChangeRequests.map((item) =>
-        item.id === id ? { ...item, status, teacherResponse } : item,
-      ),
-    }));
+  const updateAttendanceDecision = async (id: string, status: Decision, teacherResponse: string) => {
+    await runBackendMutation(
+      () =>
+        apiRequest(`/teacher/attendance-change-requests/${id}`, authToken, {
+          method: "PUT",
+          body: JSON.stringify({ status, teacher_response: teacherResponse }),
+        }),
+      "Attendance request updated.",
+    );
   };
 
-  const updateGradeChange = (id: string, status: Decision) => {
-    setState((prev) => ({
-      ...prev,
-      gradeChangeRequests: prev.gradeChangeRequests.map((item) => (item.id === id ? { ...item, status } : item)),
-    }));
+  const updateGradeChange = async (id: string, status: Decision) => {
+    await runBackendMutation(
+      () =>
+        apiRequest(`/admin/grade-change-requests/${id}`, authToken, {
+          method: "PUT",
+          body: JSON.stringify({ status }),
+        }),
+      "Grade change request updated.",
+    );
   };
 
-  const updateWithdraw = (id: string, status: Decision) => {
-    setState((prev) => ({
-      ...prev,
-      withdrawRequests: prev.withdrawRequests.map((item) => (item.id === id ? { ...item, status } : item)),
-    }));
+  const updateWithdraw = async (id: string, status: Decision) => {
+    await runBackendMutation(
+      () =>
+        apiRequest(`/admin/withdraw-requests/${id}`, authToken, {
+          method: "PUT",
+          body: JSON.stringify({ status }),
+        }),
+      "Withdrawal request updated.",
+    );
   };
 
-  const updateRetake = (id: string, status: Decision) => {
-    setState((prev) => ({
-      ...prev,
-      retakeRequests: prev.retakeRequests.map((item) => (item.id === id ? { ...item, status } : item)),
-    }));
+  const updateRetake = async (id: string, status: Decision) => {
+    await runBackendMutation(
+      () =>
+        apiRequest(`/admin/retake-requests/${id}`, authToken, {
+          method: "PUT",
+          body: JSON.stringify({ status }),
+        }),
+      "Retake request updated.",
+    );
   };
 
-  const submitMaintenance = () => {
+  const submitMaintenance = async () => {
     if (!currentUser || !maintenanceForm.classroom.trim() || !maintenanceForm.problem.trim()) return;
-    setState((prev) => ({
-      ...prev,
-      maintenanceRequests: [
-        {
-          id: `mnt-${Date.now()}`,
-          teacherId: currentUser.id,
-          classroom: maintenanceForm.classroom,
-          problem: maintenanceForm.problem,
-          status: "pending",
-        },
-        ...prev.maintenanceRequests,
-      ],
-    }));
-    setMaintenanceForm({ classroom: "", problem: "" });
+    const saved = await runBackendMutation(
+      () =>
+        apiRequest("/teacher/maintenance-requests", authToken, {
+          method: "POST",
+          body: JSON.stringify({ classroom: maintenanceForm.classroom, problem: maintenanceForm.problem }),
+        }),
+      "Maintenance request submitted.",
+    );
+    if (saved) setMaintenanceForm({ classroom: "", problem: "" });
   };
 
-  const markMaintenanceFixed = (id: string) => {
-    setState((prev) => ({
-      ...prev,
-      maintenanceRequests: prev.maintenanceRequests.map((item) => (item.id === id ? { ...item, status: "fixed" } : item)),
-    }));
+  const markMaintenanceFixed = async (id: string) => {
+    await runBackendMutation(
+      () =>
+        apiRequest(`/maintenance/requests/${id}`, authToken, {
+          method: "PUT",
+          body: JSON.stringify({ status: "fixed" }),
+        }),
+      "Maintenance request marked fixed.",
+    );
   };
 
-  const submitExtraClass = () => {
+  const submitExtraClass = async () => {
     if (!currentUser || !extraClassForm.courseId || !extraClassForm.section || !extraClassForm.reason.trim()) return;
-    setState((prev) => ({
-      ...prev,
-      extraClassRequests: [
-        {
-          id: `exc-${Date.now()}`,
-          teacherId: currentUser.id,
-          courseId: extraClassForm.courseId,
-          section: extraClassForm.section,
-          reason: extraClassForm.reason,
-          status: "pending",
-        },
-        ...prev.extraClassRequests,
-      ],
-    }));
-    setExtraClassForm({ courseId: "", section: "", reason: "" });
+    const saved = await runBackendMutation(
+      () =>
+        apiRequest("/teacher/extra-class-requests", authToken, {
+          method: "POST",
+          body: JSON.stringify({
+            course_id: backendId(extraClassForm.courseId),
+            section: extraClassForm.section,
+            reason: extraClassForm.reason,
+          }),
+        }),
+      "Extra class request submitted.",
+    );
+    if (saved) setExtraClassForm({ courseId: "", section: "", reason: "" });
   };
 
-  const updateExtraClassStatus = (id: string, status: ExtraClassRequest["status"], scheduleNote = "") => {
-    setState((prev) => ({
-      ...prev,
-      extraClassRequests: prev.extraClassRequests.map((item) =>
-        item.id === id
-          ? {
-              ...item,
-              status,
-              scheduleNote: scheduleNote || item.scheduleNote,
-            }
-          : item,
-      ),
-    }));
+  const updateExtraClassStatus = async (id: string, status: ExtraClassRequest["status"], scheduleNote = "") => {
+    await runBackendMutation(
+      () =>
+        apiRequest(`/secretariat/extra-class-requests/${id}`, authToken, {
+          method: "PUT",
+          body: JSON.stringify({ status, schedule_note: scheduleNote || null }),
+        }),
+      "Extra class request updated.",
+    );
   };
 
-  const createUser = () => {
+  const createUser = async () => {
     if (!currentUser || currentUser.role !== "admin") return;
     const adminCampusPrograms = campusPrograms[currentUser.campus];
+    const campusId = campusIdsByName[currentUser.campus];
+    const programId = programIdsByName[newUserForm.degree];
     if (
       !newUserForm.rollNumber ||
       !newUserForm.password ||
       !newUserForm.fullName ||
       !newUserForm.email ||
+      !campusId ||
       newUserForm.campus !== currentUser.campus ||
+      (newUserForm.role === "student" && !programId) ||
       (newUserForm.role === "student" && !adminCampusPrograms.includes(newUserForm.degree)) ||
       state.users.some((item) => item.rollNumber === newUserForm.rollNumber)
     ) {
       return;
     }
-    const id = `u-${newUserForm.role}-${Date.now()}`;
-    setState((prev) => ({
-      ...prev,
-      users: [
-        ...prev.users,
-        {
-          id,
-          rollNumber: newUserForm.rollNumber,
+    const saved = await runBackendMutation(async () => {
+      const created = await apiRequest<{ id: number }>("/users", authToken, {
+        method: "POST",
+        body: JSON.stringify({
+          roll_number: newUserForm.rollNumber,
           password: newUserForm.password,
           role: newUserForm.role,
-          campus: newUserForm.campus,
-          profile: {
-            fullName: newUserForm.fullName,
-            gender: newUserForm.gender,
-            dob: newUserForm.dob,
-            cnic: newUserForm.cnic,
-            nationality: newUserForm.nationality,
-            email: newUserForm.email,
-            number: newUserForm.number,
-          },
-        },
-      ],
-      studentInfo:
-        newUserForm.role === "student"
-          ? {
-              ...prev.studentInfo,
-              [id]: {
-                rollNumber: newUserForm.rollNumber,
-                degree: newUserForm.degree,
-                batch: "Fall 2026",
-                currentSemester: newUserForm.currentSemester,
-                section: "A",
-                campus: newUserForm.campus,
-                status: "Current",
-              },
-            }
-          : prev.studentInfo,
-    }));
-    setNewUserForm({
-      rollNumber: "",
-      password: "",
-      role: "student",
-      campus: currentUser.campus,
-      degree: campusPrograms[currentUser.campus][0],
-      currentSemester: 1,
-      fullName: "",
-      gender: "",
-      dob: "",
-      cnic: "",
-      nationality: "Pakistani",
-      email: "",
-      number: "",
-    });
+          campus_id: campusId,
+          full_name: newUserForm.fullName,
+          gender: newUserForm.gender || "Not Specified",
+          dob: newUserForm.dob || "2000-01-01",
+          cnic: newUserForm.cnic || `AUTO-${Date.now()}`,
+          nationality: newUserForm.nationality || "Pakistani",
+          email: newUserForm.email,
+          phone_number: newUserForm.number || "+92-300-0000000",
+        }),
+      });
+      if (newUserForm.role === "student") {
+        await apiRequest(`/students/${created.id}/profile`, authToken, {
+          method: "PUT",
+          body: JSON.stringify({
+            program_id: programId,
+            batch: "Fall 2026",
+            current_semester: newUserForm.currentSemester,
+            section: "A",
+            is_current: true,
+          }),
+        });
+      }
+    }, "User created.");
+    if (saved) {
+      setNewUserForm({
+        rollNumber: "",
+        password: "",
+        role: "student",
+        campus: currentUser.campus,
+        degree: campusPrograms[currentUser.campus][0],
+        currentSemester: 1,
+        fullName: "",
+        gender: "",
+        dob: "",
+        cnic: "",
+        nationality: "Pakistani",
+        email: "",
+        number: "",
+      });
+    }
   };
 
-  const removeUser = (id: string) => {
+  const removeUser = async (id: string) => {
     if (!currentUser || currentUser.role !== "admin") return;
     const user = state.users.find((item) => item.id === id);
     if (!user || user.role === "admin" || user.campus !== currentUser.campus) return;
-    setState((prev) => ({ ...prev, users: prev.users.filter((item) => item.id !== id) }));
+    await runBackendMutation(
+      () => apiRequest(`/users/${id}`, authToken, { method: "DELETE" }),
+      "User deleted.",
+    );
   };
 
-  const updateManagedUser = () => {
+  const updateManagedUser = async () => {
     if (!selectedManagedUserId) return;
-    setState((prev) => {
-      const duplicateRoll = prev.users.some(
-        (item) => item.id !== selectedManagedUserId && item.rollNumber === editUserForm.rollNumber,
-      );
-      if (duplicateRoll) return prev;
-
-      const updatedUsers = prev.users.map((user) =>
-        user.id === selectedManagedUserId
-          ? {
-              ...user,
-              rollNumber: editUserForm.rollNumber,
-              role: editUserForm.role,
-              campus: editUserForm.campus,
-              profile: {
-                fullName: editUserForm.fullName,
-                gender: editUserForm.gender,
-                dob: editUserForm.dob,
-                cnic: editUserForm.cnic,
-                nationality: editUserForm.nationality,
-                email: editUserForm.email,
-                number: editUserForm.number,
-              },
-            }
-          : user,
-      );
-
-      const updatedStudentInfo = { ...prev.studentInfo };
+    const campusId = campusIdsByName[currentUser?.campus ?? editUserForm.campus];
+    const programId = programIdsByName[editUserForm.degree];
+    const duplicateRoll = state.users.some((item) => item.id !== selectedManagedUserId && item.rollNumber === editUserForm.rollNumber);
+    if (!campusId || duplicateRoll || (editUserForm.role === "student" && !programId)) return;
+    await runBackendMutation(async () => {
+      await apiRequest(`/users/${selectedManagedUserId}`, authToken, {
+        method: "PUT",
+        body: JSON.stringify(
+          compactPayload({
+            roll_number: editUserForm.rollNumber,
+            role: editUserForm.role,
+            campus_id: campusId,
+            full_name: editUserForm.fullName,
+            gender: editUserForm.gender || "Not Specified",
+            dob: editUserForm.dob || "2000-01-01",
+            cnic: editUserForm.cnic,
+            nationality: editUserForm.nationality || "Pakistani",
+            email: editUserForm.email,
+            phone_number: editUserForm.number,
+          }),
+        ),
+      });
       if (editUserForm.role === "student") {
-        updatedStudentInfo[selectedManagedUserId] = {
-          rollNumber: editUserForm.rollNumber,
-          degree: editUserForm.degree,
-          batch: editUserForm.batch,
-          currentSemester: editUserForm.currentSemester,
-          section: editUserForm.section,
-          campus: editUserForm.campus,
-          status: editUserForm.status,
-        };
-      } else {
-        delete updatedStudentInfo[selectedManagedUserId];
+        await apiRequest(`/students/${selectedManagedUserId}/profile`, authToken, {
+          method: "PUT",
+          body: JSON.stringify({
+            program_id: programId,
+            batch: editUserForm.batch || "Fall 2026",
+            current_semester: editUserForm.currentSemester,
+            section: editUserForm.section || "A",
+            is_current: editUserForm.status === "Current",
+          }),
+        });
       }
-
-      return {
-        ...prev,
-        users: updatedUsers,
-        studentInfo: updatedStudentInfo,
-      };
-    });
+    }, "User updated.");
   };
 
   const runIntegrityAudit = () => {
@@ -1855,159 +1947,70 @@ export default function App() {
     setIntegrityMessage(summary);
   };
 
-  const runAutoFinalization = () => {
-    setState((prev) => {
-      if (!prev.automation.autoFinalizeEnabled) return prev;
-
-      const nextProcessed = [...prev.automation.processedStudentSemesters];
-      const finalizedNow: string[] = [];
-      const transcriptUpdates: Record<string, TranscriptSemester[]> = { ...prev.transcript };
-      const removals = new Set<string>();
-
-      const activeStudents = prev.users.filter((user) => user.role === "student" && prev.studentInfo[user.id]?.status === "Current");
-
-      activeStudents.forEach((student) => {
-        const info = prev.studentInfo[student.id];
-        if (!info) return;
-        const key = `${student.id}-sem-${info.currentSemester}`;
-        if (nextProcessed.includes(key)) return;
-
-        const semesterEnrollments = prev.enrollments.filter((enrollment) => {
-          if (enrollment.studentId !== student.id) return false;
-          const course = prev.courses.find((item) => item.id === enrollment.courseId);
-          return course?.semester === info.currentSemester;
-        });
-
-        if (!semesterEnrollments.length) return;
-
-        const allFinalsSubmitted = semesterEnrollments.every((enrollment) => {
-          const finalTheoryTemplates = prev.assessmentTemplates.filter(
-            (template) =>
-              template.courseId === enrollment.courseId &&
-              template.section === enrollment.section &&
-              template.part === "theory" &&
-              template.category === "Final",
-          );
-          if (!finalTheoryTemplates.length) return false;
-          const theorySubmitted = finalTheoryTemplates.every((template) =>
-            prev.assessmentScores.some(
-              (score) => score.assessmentId === template.id && score.studentId === enrollment.studentId,
-            ),
-          );
-          if (!theorySubmitted) return false;
-
-          if (enrollment.includeLab) {
-            const finalLabTemplates = prev.assessmentTemplates.filter(
-              (template) =>
-                template.courseId === enrollment.courseId &&
-                template.section === enrollment.section &&
-                template.part === "lab" &&
-                template.category === "Final",
-            );
-            if (!finalLabTemplates.length) return false;
-            return finalLabTemplates.every((template) =>
-              prev.assessmentScores.some(
-                (score) => score.assessmentId === template.id && score.studentId === enrollment.studentId,
-              ),
-            );
-          }
-          return true;
-        });
-
-        if (!allFinalsSubmitted) return;
-
-        const termLabel = `Semester ${info.currentSemester} - Auto Finalized ${new Date().getFullYear()}`;
-        const newCourses = semesterEnrollments.map((enrollment) => {
-          const course = prev.courses.find((item) => item.id === enrollment.courseId);
-          const templates = prev.assessmentTemplates.filter(
-            (template) =>
-              template.courseId === enrollment.courseId &&
-              template.section === enrollment.section &&
-              (template.part === "theory" || (enrollment.includeLab && template.part === "lab")),
-          );
-          const obtainedWeightage = templates.reduce((sum, template) => {
-            const score = prev.assessmentScores.find(
-              (entry) => entry.assessmentId === template.id && entry.studentId === enrollment.studentId,
-            );
-            if (!score || template.totalMarks <= 0) return sum;
-            return sum + (score.obtainedMarks / template.totalMarks) * template.weightage;
-          }, 0);
-          const totalWeightage = templates.reduce((sum, template) => sum + template.weightage, 0);
-          const normalized = totalWeightage > 0 ? (obtainedWeightage / totalWeightage) * 100 : 0;
-          return {
-            courseId: enrollment.courseId,
-            grade: getLetterGrade(normalized),
-            credits: course?.credits ?? 3,
-          };
-        });
-
-        const existingSemesters = [...(transcriptUpdates[student.id] ?? [])];
-        existingSemesters.push({ term: termLabel, courses: newCourses, sgpa: 0, cgpa: 0 });
-        transcriptUpdates[student.id] = recalculateTranscript(existingSemesters);
-
-        semesterEnrollments.forEach((enrollment) => removals.add(`${enrollment.studentId}-${enrollment.courseId}`));
-        nextProcessed.push(key);
-        finalizedNow.push(key);
-      });
-
-      if (!removals.size) return prev;
-
-      const updatedStudentInfo = { ...prev.studentInfo };
-      finalizedNow.forEach((key) => {
-        const [studentId] = key.split("-sem-");
-        if (updatedStudentInfo[studentId]) {
-          updatedStudentInfo[studentId] = {
-            ...updatedStudentInfo[studentId],
-            currentSemester: Math.min(8, updatedStudentInfo[studentId].currentSemester + 1),
-          };
-        }
-      });
-
-      const remainingEnrollments = prev.enrollments.filter(
-        (enrollment) => !removals.has(`${enrollment.studentId}-${enrollment.courseId}`),
-      );
-
-      const activePairs = new Set(remainingEnrollments.map((item) => `${item.courseId}-${item.section}`));
-      const remainingAssignments = prev.teachingAssignments.filter((assignment) =>
-        activePairs.has(`${assignment.courseId}-${assignment.section}`),
-      );
-
-      return {
-        ...prev,
-        transcript: transcriptUpdates,
-        studentInfo: updatedStudentInfo,
-        enrollments: remainingEnrollments,
-        teachingAssignments: remainingAssignments,
-        automation: {
-          ...prev.automation,
-          processedStudentSemesters: nextProcessed,
-        },
-      };
-    });
+  const runAutoFinalization = async () => {
+    if (!currentTermId) return;
+    await runBackendMutation(
+      () =>
+        apiRequest("/automation/finalize", authToken, {
+          method: "POST",
+          body: JSON.stringify({ term_id: backendId(currentTermId) }),
+        }),
+      "Semester finalization completed.",
+    );
   };
 
-  useEffect(() => {
-    if (!state.automation.autoFinalizeEnabled) return;
-    runAutoFinalization();
-  }, [state.assessmentScores, state.assessmentTemplates, state.enrollments, state.automation.autoFinalizeEnabled]);
+  const saveWindows = async (windows: AppState["windows"]) => {
+    if (!currentTermId) return;
+    await runBackendMutation(
+      () =>
+        apiRequest(`/terms/${currentTermId}/windows`, authToken, {
+          method: "PUT",
+          body: JSON.stringify({
+            registration_open: windows.registration.isOpen,
+            start_date: windows.registration.start,
+            end_date: windows.registration.end,
+            feedback_mid_open: windows.feedbackMid,
+            feedback_end_open: windows.feedbackEnd,
+            retake_open: windows.retake,
+          }),
+        }),
+      "Academic windows saved.",
+    );
+  };
 
   const updateRegistrationWindow = (field: "start" | "end", value: string) => {
-    setState((prev) => ({
-      ...prev,
-      windows: { ...prev.windows, registration: { ...prev.windows.registration, [field]: value } },
-    }));
+    const nextWindows = {
+      ...state.windows,
+      registration: { ...state.windows.registration, [field]: value },
+    };
+    setState((prev) => ({ ...prev, windows: nextWindows }));
+    void saveWindows(nextWindows);
   };
 
   const setRegistrationWindowState = (isOpen: boolean) => {
-    setState((prev) => ({
-      ...prev,
-      windows: { ...prev.windows, registration: { ...prev.windows.registration, isOpen } },
-    }));
+    const nextWindows = {
+      ...state.windows,
+      registration: { ...state.windows.registration, isOpen },
+    };
+    setState((prev) => ({ ...prev, windows: nextWindows }));
+    void saveWindows(nextWindows);
+  };
+
+  const setFeedbackWindowState = (key: "feedbackMid" | "feedbackEnd", value: boolean) => {
+    const nextWindows = { ...state.windows, [key]: value };
+    setState((prev) => ({ ...prev, windows: nextWindows }));
+    void saveWindows(nextWindows);
+  };
+
+  const setRetakeWindowState = (value: boolean) => {
+    const nextWindows = { ...state.windows, retake: value };
+    setState((prev) => ({ ...prev, windows: nextWindows }));
+    void saveWindows(nextWindows);
   };
 
 
-  const createTeachingAssignment = () => {
-    if (!currentUser || currentUser.role !== "admin") return;
+  const createTeachingAssignment = async () => {
+    if (!currentUser || currentUser.role !== "admin" || !currentTermId) return;
     if (!teacherAssignmentForm.teacherId || !teacherAssignmentForm.courseId || !teacherAssignmentForm.section) return;
     const course = state.courses.find((item) => item.id === teacherAssignmentForm.courseId);
     const teacher = state.users.find((item) => item.id === teacherAssignmentForm.teacherId);
@@ -2024,30 +2027,31 @@ export default function App() {
     );
     if (exists) return;
 
-    setState((prev) => ({
-      ...prev,
-      teachingAssignments: [
-        {
-          id: `ta-${Date.now()}`,
-          courseId: teacherAssignmentForm.courseId,
-          section: teacherAssignmentForm.section,
-          teacherId: teacherAssignmentForm.teacherId,
-          part: teacherAssignmentForm.part,
-        },
-        ...prev.teachingAssignments,
-      ],
-    }));
+    await runBackendMutation(
+      () =>
+        apiRequest("/course-offerings", authToken, {
+          method: "POST",
+          body: JSON.stringify({
+            term_id: backendId(currentTermId),
+            course_id: backendId(teacherAssignmentForm.courseId),
+            section: teacherAssignmentForm.section,
+            part: teacherAssignmentForm.part,
+            teacher_id: backendId(teacherAssignmentForm.teacherId),
+          }),
+        }),
+      "Teacher allocation created.",
+    );
   };
 
-  const removeTeachingAssignment = (id: string) => {
-    setState((prev) => ({
-      ...prev,
-      teachingAssignments: prev.teachingAssignments.filter((item) => item.id !== id),
-    }));
+  const removeTeachingAssignment = async (id: string) => {
+    await runBackendMutation(
+      () => apiRequest(`/course-offerings/${id}`, authToken, { method: "DELETE" }),
+      "Teacher allocation removed.",
+    );
   };
 
-  const assignStudentByAdmin = () => {
-    if (!currentUser || currentUser.role !== "admin") return;
+  const assignStudentByAdmin = async () => {
+    if (!currentUser || currentUser.role !== "admin" || !currentTermId) return;
     if (!studentAssignmentForm.studentId || !studentAssignmentForm.courseId || !studentAssignmentForm.section) return;
     const course = state.courses.find((item) => item.id === studentAssignmentForm.courseId);
     const student = state.users.find((item) => item.id === studentAssignmentForm.studentId);
@@ -2060,47 +2064,23 @@ export default function App() {
     );
     if (alreadyEnrolled) return;
 
-    setState((prev) => ({
-      ...prev,
-      enrollments: [
-        ...prev.enrollments,
-        {
-          studentId: studentAssignmentForm.studentId,
-          courseId: studentAssignmentForm.courseId,
-          section: studentAssignmentForm.section,
-          includeLab: studentAssignmentForm.includeLab,
-        },
-      ],
-      marks: prev.marks.some(
-        (entry) => entry.studentId === studentAssignmentForm.studentId && entry.courseId === studentAssignmentForm.courseId,
-      )
-        ? prev.marks
-        : [
-            ...prev.marks,
-            {
-              studentId: studentAssignmentForm.studentId,
-              courseId: studentAssignmentForm.courseId,
-              theory: { assignments: [], quizzes: [], midterm: 0, final: 0 },
-              ...(studentAssignmentForm.includeLab ? { lab: { assignments: [], quizzes: [], final: 0 } } : {}),
-            },
-          ],
-      attendance: prev.attendance.some(
-        (entry) => entry.studentId === studentAssignmentForm.studentId && entry.courseId === studentAssignmentForm.courseId,
-      )
-        ? prev.attendance
-        : [
-            ...prev.attendance,
-            {
-              studentId: studentAssignmentForm.studentId,
-              courseId: studentAssignmentForm.courseId,
-              theory: [],
-              lab: [],
-            },
-          ],
-    }));
+    await runBackendMutation(
+      () =>
+        apiRequest("/enrollments", authToken, {
+          method: "POST",
+          body: JSON.stringify({
+            term_id: backendId(currentTermId),
+            student_id: backendId(studentAssignmentForm.studentId),
+            course_id: backendId(studentAssignmentForm.courseId),
+            section: studentAssignmentForm.section,
+            include_lab: studentAssignmentForm.includeLab,
+          }),
+        }),
+      "Student enrollment saved.",
+    );
   };
 
-  const updateTranscriptByAdmin = () => {
+  const updateTranscriptByAdmin = async () => {
     if (!currentUser || currentUser.role !== "admin") return;
     if (!transcriptForm.studentId || !transcriptForm.term.trim() || !transcriptForm.courseId || !transcriptForm.grade) {
       setTranscriptMessage("Please complete student, term, course, and grade.");
@@ -2117,37 +2097,21 @@ export default function App() {
       return;
     }
 
-    setState((prev) => {
-      const existing = [...(prev.transcript[transcriptForm.studentId] ?? [])];
-      const termIndex = existing.findIndex((semester) => semester.term === transcriptForm.term);
-
-      if (termIndex === -1) {
-        existing.push({
-          term: transcriptForm.term,
-          courses: [{ courseId: transcriptForm.courseId, grade: transcriptForm.grade, credits }],
-          sgpa: 0,
-          cgpa: 0,
-        });
-      } else {
-        const semester = existing[termIndex];
-        const courseIndex = semester.courses.findIndex((course) => course.courseId === transcriptForm.courseId);
-        if (courseIndex === -1) {
-          semester.courses.push({ courseId: transcriptForm.courseId, grade: transcriptForm.grade, credits });
-        } else {
-          semester.courses[courseIndex] = { courseId: transcriptForm.courseId, grade: transcriptForm.grade, credits };
-        }
-      }
-
-      return {
-        ...prev,
-        transcript: {
-          ...prev.transcript,
-          [transcriptForm.studentId]: recalculateTranscript(existing),
-        },
-      };
-    });
-
-    setTranscriptMessage("Transcript updated successfully.");
+    const saved = await runBackendMutation(
+      () =>
+        apiRequest("/admin/transcripts", authToken, {
+          method: "POST",
+          body: JSON.stringify({
+            student_id: backendId(transcriptForm.studentId),
+            term_name: transcriptForm.term,
+            course_id: backendId(transcriptForm.courseId),
+            grade: transcriptForm.grade,
+            credits,
+          }),
+        }),
+      "Transcript updated successfully.",
+    );
+    setTranscriptMessage(saved ? "Transcript updated successfully." : "Transcript update failed.");
   };
 
   if (!currentUser) {
@@ -2206,9 +2170,10 @@ export default function App() {
                 {loginError ? <p className="text-sm text-rose-200">{loginError}</p> : null}
                 <button
                   onClick={login}
-                  className="w-full rounded-xl bg-gradient-to-r from-cyan-200 to-blue-100 px-4 py-2.5 text-sm font-semibold text-blue-900 transition hover:from-cyan-100 hover:to-white"
+                  disabled={isBootstrapping}
+                  className="w-full rounded-xl bg-gradient-to-r from-cyan-200 to-blue-100 px-4 py-2.5 text-sm font-semibold text-blue-900 transition hover:from-cyan-100 hover:to-white disabled:cursor-wait disabled:opacity-70"
                 >
-                  Enter Flex 2.0
+                  {isBootstrapping ? "Connecting..." : "Enter Flex 2.0"}
                 </button>
               </div>
             </div>
@@ -2254,6 +2219,7 @@ export default function App() {
         </aside>
 
         <section className="glass-shell rounded-2xl p-5 lg:p-7">
+          {apiMessage ? <p className="mb-4 rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-sm text-blue-700">{apiMessage}</p> : null}
           <AnimatePresence mode="wait">
             <motion.div
               key={activeTab}
@@ -3228,7 +3194,7 @@ export default function App() {
                               Approve
                             </button>
                             <button
-                              onClick={() => updateExtraClassStatus(item.id, "scheduled", "Tue 2:00 PM | Room B-14")}
+                              onClick={() => updateExtraClassStatus(item.id, "approved", "Tue 2:00 PM | Room B-14")}
                               className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs text-white"
                             >
                               Schedule
@@ -3777,19 +3743,19 @@ export default function App() {
                     <p className="font-medium">Feedback and Retake Windows</p>
                     <div className="flex flex-wrap gap-3 text-sm">
                       <button
-                        onClick={() => setState((prev) => ({ ...prev, windows: { ...prev.windows, feedbackMid: !prev.windows.feedbackMid } }))}
+                        onClick={() => setFeedbackWindowState("feedbackMid", !state.windows.feedbackMid)}
                         className="rounded-lg border border-blue-300 px-3 py-2"
                       >
                         Mid Feedback: {state.windows.feedbackMid ? "Open" : "Closed"}
                       </button>
                       <button
-                        onClick={() => setState((prev) => ({ ...prev, windows: { ...prev.windows, feedbackEnd: !prev.windows.feedbackEnd } }))}
+                        onClick={() => setFeedbackWindowState("feedbackEnd", !state.windows.feedbackEnd)}
                         className="rounded-lg border border-blue-300 px-3 py-2"
                       >
                         End Feedback: {state.windows.feedbackEnd ? "Open" : "Closed"}
                       </button>
                       <button
-                        onClick={() => setState((prev) => ({ ...prev, windows: { ...prev.windows, retake: !prev.windows.retake } }))}
+                        onClick={() => setRetakeWindowState(!state.windows.retake)}
                         className="rounded-lg border border-blue-300 px-3 py-2"
                       >
                         Retake: {state.windows.retake ? "Open" : "Closed"}
