@@ -121,3 +121,69 @@ class ExtraClassRequestCreate(BaseModel):
 class ExtraClassRequestUpdate(BaseModel):
     status: Literal["pending", "approved", "denied"]
     schedule_note: str | None = None
+
+
+class PasswordChangeIn(BaseModel):
+    current_password: str
+    new_password: str = Field(min_length=6)
+
+
+class CourseOfferingCreate(BaseModel):
+    term_id: int
+    course_id: int
+    section: str
+    part: Literal["theory", "lab"]
+    teacher_id: int
+
+
+class TermWindowsUpdate(BaseModel):
+    registration_open: bool | None = None
+    start_date: date | None = None
+    end_date: date | None = None
+    feedback_mid_open: bool | None = None
+    feedback_end_open: bool | None = None
+    retake_open: bool | None = None
+
+
+class TranscriptEntryUpsert(BaseModel):
+    student_id: int
+    term_name: str
+    course_id: int
+    grade: str
+    credits: int = Field(gt=0)
+
+
+class RequestDecisionUpdate(BaseModel):
+    status: Literal["pending", "approved", "denied"]
+    teacher_response: str | None = None
+
+
+class MarksChangeRequestCreate(BaseModel):
+    course_id: int
+    part: Literal["theory", "lab"]
+    component: str
+    reason: str
+
+
+class AttendanceChangeRequestCreate(BaseModel):
+    course_id: int
+    part: Literal["theory", "lab"]
+    class_date: date
+    reason: str
+
+
+class CourseRequestCreate(BaseModel):
+    course_id: int
+    reason: str
+
+
+class RetakeRequestCreate(CourseRequestCreate):
+    evidence: str
+
+
+class FeedbackSubmissionCreate(BaseModel):
+    course_id: int
+    phase: Literal["Mid", "End"]
+    concept_delivery: int = Field(ge=1, le=5)
+    teacher_engagement: int = Field(ge=1, le=5)
+    open_text: str
