@@ -2184,16 +2184,16 @@ export default function App() {
   }
 
   return (
-    <main className="app-canvas workspace min-h-screen text-blue-950">
+    <main className="app-canvas workspace min-h-screen overflow-x-hidden text-blue-950">
       <header className="soft-divider border-b bg-white/70 px-4 py-4 backdrop-blur-xl lg:px-8">
-        <div className="mx-auto flex w-full max-w-7xl items-center justify-between">
-          <div>
+        <div className="mx-auto flex w-full max-w-7xl flex-wrap items-center justify-between gap-3">
+          <div className="min-w-0">
             <p className="text-xs font-semibold uppercase tracking-[0.24em] text-blue-700">Flex 2.0</p>
             <h1 className="text-xl font-semibold tracking-tight">University Operating System</h1>
           </div>
-          <div className="flex items-center gap-3">
-            <div className="text-right">
-              <p className="text-sm font-medium">{currentUser.profile.fullName}</p>
+          <div className="flex min-w-0 items-center gap-3">
+            <div className="min-w-0 text-right">
+              <p className="truncate text-sm font-medium">{currentUser.profile.fullName}</p>
               <p className="text-xs text-blue-700">{roleLabels[currentUser.role]} | {currentUser.campus}</p>
             </div>
             <button onClick={logout} className="rounded-xl border border-blue-200/80 bg-white/80 px-3 py-1.5 text-sm hover:bg-blue-100">
@@ -2203,8 +2203,8 @@ export default function App() {
         </div>
       </header>
 
-      <div className="mx-auto grid w-full max-w-7xl gap-6 px-4 py-6 lg:grid-cols-[240px_1fr] lg:px-8">
-        <aside className="glass-shell space-y-1 rounded-2xl p-3">
+      <div className="mx-auto grid w-full max-w-7xl min-w-0 gap-6 px-4 py-6 lg:grid-cols-[240px_minmax(0,1fr)] lg:px-8">
+        <aside className="glass-shell min-w-0 space-y-1 rounded-2xl p-3">
           {roleTabs.map((tab) => (
             <button
               key={tab.key}
@@ -2218,7 +2218,7 @@ export default function App() {
           ))}
         </aside>
 
-        <section className="glass-shell rounded-2xl p-5 lg:p-7">
+        <section className="glass-shell min-w-0 overflow-hidden rounded-2xl p-5 lg:p-7">
           {apiMessage ? <p className="mb-4 rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-sm text-blue-700">{apiMessage}</p> : null}
           <AnimatePresence mode="wait">
             <motion.div
@@ -2227,7 +2227,7 @@ export default function App() {
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -8 }}
               transition={{ duration: 0.2 }}
-              className="space-y-6"
+              className="min-w-0 space-y-6"
             >
               {activeTab === "profile" && (
                 <div className="space-y-5">
@@ -2770,7 +2770,7 @@ export default function App() {
               {currentUser.role === "teacher" && activeTab === "teacher-marks" && (
                 <div className="space-y-5">
                   {sectionTitle("Manage Marks", "Create assessments dynamically and enter marks in table form")}
-                  <div className="grid gap-3 md:grid-cols-[1fr_1fr_1fr_1fr_1fr_1fr_auto] border border-blue-100 p-4">
+                  <div className="grid min-w-0 gap-3 border border-blue-100 p-4 sm:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_auto]">
                     <select
                       value={assessmentForm.courseId}
                       onChange={(event) => setAssessmentForm((prev) => ({ ...prev, courseId: event.target.value, section: "" }))}
@@ -2905,7 +2905,7 @@ export default function App() {
               {currentUser.role === "teacher" && activeTab === "teacher-attendance" && (
                 <div className="space-y-5">
                   {sectionTitle("Manage Attendance", "Create class days and mark attendance of students by section")}
-                  <div className="grid gap-3 md:grid-cols-[1fr_1fr_1fr_1fr_auto] border border-blue-100 p-4">
+                  <div className="grid min-w-0 gap-3 border border-blue-100 p-4 sm:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_auto]">
                     <select
                       value={attendanceSessionForm.courseId}
                       onChange={(event) => setAttendanceSessionForm((prev) => ({ ...prev, courseId: event.target.value, section: "" }))}
@@ -3102,7 +3102,7 @@ export default function App() {
               {currentUser.role === "teacher" && activeTab === "extra-class" && (
                 <div className="space-y-5">
                   {sectionTitle("Extra Class Request", "Request additional class slots to be approved or scheduled by secretariat")}
-                  <div className="grid gap-3 md:grid-cols-[1fr_1fr_2fr_auto]">
+                  <div className="grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,2fr)_auto]">
                     <select
                       value={extraClassForm.courseId}
                       onChange={(event) => setExtraClassForm((prev) => ({ ...prev, courseId: event.target.value }))}
@@ -3222,7 +3222,7 @@ export default function App() {
                   <p className="text-sm text-blue-700">
                     Programs in {currentUser.campus}: {currentCampusPrograms.length} / {degreePrograms.length} university programs.
                   </p>
-                  <div className="grid gap-3 md:grid-cols-3">
+                  <div className="grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-3">
                     <input
                       value={newUserForm.rollNumber}
                       onChange={(event) => setNewUserForm((prev) => ({ ...prev, rollNumber: event.target.value }))}
@@ -3325,7 +3325,7 @@ export default function App() {
                   </button>
                   <div className="space-y-3 border border-blue-100 p-4">
                     <p className="font-medium">Update Existing User</p>
-                    <div className="grid gap-3 md:grid-cols-3">
+                    <div className="grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-3">
                       <select
                         value={selectedManagedUserId}
                         onChange={(event) => setSelectedManagedUserId(event.target.value)}
@@ -3482,7 +3482,7 @@ export default function App() {
               {currentUser.role === "admin" && activeTab === "course-allocation" && (
                 <div className="space-y-6">
                   {sectionTitle("Teacher Allocations", "Assign teachers by course, section, and delivery part (theory or lab)")}
-                  <div className="grid gap-3 md:grid-cols-5">
+                  <div className="grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-5">
                     <select
                       value={teacherAssignmentForm.teacherId}
                       onChange={(event) => setTeacherAssignmentForm((prev) => ({ ...prev, teacherId: event.target.value }))}
@@ -3564,7 +3564,7 @@ export default function App() {
               {currentUser.role === "admin" && activeTab === "enrollment-management" && (
                 <div className="space-y-6">
                   {sectionTitle("Student Enrollments", "Admin can directly assign students to courses and sections")}
-                  <div className="grid gap-3 md:grid-cols-[1.3fr_1fr_1fr_auto_auto]">
+                  <div className="grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)_minmax(0,1fr)_auto_auto]">
                     <select
                       value={studentAssignmentForm.studentId}
                       onChange={(event) => setStudentAssignmentForm((prev) => ({ ...prev, studentId: event.target.value }))}
@@ -3635,7 +3635,7 @@ export default function App() {
               {currentUser.role === "admin" && activeTab === "transcript-management" && (
                 <div className="space-y-6">
                   {sectionTitle("Transcript Control", "Update or insert semester outcomes for any student")}
-                  <div className="grid gap-3 md:grid-cols-[1.2fr_1fr_1fr_0.8fr_0.7fr_auto]">
+                  <div className="grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,0.8fr)_minmax(0,0.7fr)_auto]">
                     <select
                       value={transcriptForm.studentId}
                       onChange={(event) => setTranscriptForm((prev) => ({ ...prev, studentId: event.target.value }))}
@@ -3712,7 +3712,7 @@ export default function App() {
                     <p className="text-sm text-blue-700">
                       Manual switch: {state.windows.registration.isOpen ? "Open" : "Closed"} | Effective status: {isRegistrationOpen ? "Open" : "Closed"}
                     </p>
-                    <div className="grid gap-3 md:grid-cols-[1fr_1fr_auto_auto]">
+                    <div className="grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto_auto]">
                       <input
                         type="date"
                         value={state.windows.registration.start}
